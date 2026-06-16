@@ -321,8 +321,8 @@
         <div class="body">
           <div class="table-wrap clients-scroll">
             <table>
-              <thead><tr><th>IP</th><th>Name</th><th>WAN</th><th>Device</th><th>State</th></tr></thead>
-              <tbody id="clients"><tr><td colspan="5">No data</td></tr></tbody>
+              <thead><tr><th>IP</th><th>Name</th><th>WAN</th><th>Device</th><th>Out</th><th>State</th></tr></thead>
+              <tbody id="clients"><tr><td colspan="6">No data</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -393,20 +393,26 @@
       raw.textContent = data.raw || data.error || 'No status.';
 
       const wans = data.wans || [];
-      const clients = mergeClients(data.clients || [], data.planned_clients || []);
+      const clients = mergeClients(data.clients || [], data.planned_clients || [], data.client_rates || []);
       document.getElementById('wanCount').textContent = wans.length + ' active';
       document.getElementById('clientCount').textContent = clients.length + ' shown';
       renderWanRows(wans, data.time || '');
-      renderRows('clients', clients, ['ip', 'host', 'wan', 'dev', 'state']);
+      renderRows('clients', clients, ['ip', 'host', 'wan', 'dev', 'rate', 'state']);
     }
 
-    function mergeClients(installed, planned) {
+    function mergeClients(installed, planned, rates) {
+      const rateByIp = new Map(rates.map((row) => [row.ip, row.rate_bps || '0']));
       const plannedByIp = new Map(planned.map((row) => [row.ip, row]));
       const rows = installed.map((row) => {
+        const plannedRow = plannedByIp.get(row.ip);
         plannedByIp.delete(row.ip);
-        return Object.assign({ state: 'installed' }, row);
+        const rate = rateByIp.get(row.ip) || (plannedRow && plannedRow.rate_bps) || row.rate_bps || '0';
+        return Object.assign({ state: 'installed', rate: formatClientRate(rate) }, row);
       });
-      plannedByIp.forEach((row) => rows.push(Object.assign({ state: 'planned' }, row)));
+      plannedByIp.forEach((row) => {
+        const rate = rateByIp.get(row.ip) || row.rate_bps || '0';
+        rows.push(Object.assign({ state: 'planned', rate: formatClientRate(rate) }, row));
+      });
       rows.sort((a, b) => ipSortKey(a.ip).localeCompare(ipSortKey(b.ip)));
       return rows;
     }
@@ -470,6 +476,12 @@
       if (mbps < 0.1) return mbps.toFixed(3) + ' Mbps';
       if (mbps < 10) return mbps.toFixed(2) + ' Mbps';
       return mbps.toFixed(1) + ' Mbps';
+    }
+
+    function formatClientRate(bitsPerSecond) {
+      const rate = Number(bitsPerSecond || 0);
+      if (!Number.isFinite(rate) || rate <= 0) return '--';
+      return formatMbps(rate);
     }
 
     function formatBytes(bytes) {

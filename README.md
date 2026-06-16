@@ -49,6 +49,7 @@ Live checks confirmed source-based route selection for real LAN clients. Shadow 
 - LAN dashboard at `/wan-split/index.html` with ENABLE, DISABLE, and REBALANCE buttons.
 - Per-WAN TX/RX counters and browser-calculated outbound Mbps estimate.
 - Client table showing installed clients plus newly planned clients that will be picked up on rebalance.
+- Optional throughput-aware mode that samples per-client upload rates and assigns heavier clients to less-utilized, higher-capacity WANs.
 - WAN health checks before assigning clients.
 - Hotplug rebalancing when interfaces go up or down.
 - Even-count assignment mode for roughly equal client counts per WAN.
@@ -86,6 +87,35 @@ client D -> WAN modem_2_1
 ```
 
 If one WAN fails health checks, all clients are moved to the remaining healthy WANs. If no WAN is healthy, the tool removes its policy routes instead of leaving stale rules behind.
+
+## Throughput Mode
+
+The default mode is still `balanced`, which spreads clients by count. That is the safest mode and it is the one you should use first.
+
+`throughput` mode is for the next problem: one client is doing 40 Mbps, another is doing 2 Mbps, and pretending those two clients are equal is silly.
+
+When `ASSIGNMENT_MODE=throughput`, `wan-split` can sample per-client upload counters using a tiny `iptables` mangle chain, smooth those samples into recent bitrates, and then assign clients greedily:
+
+1. Sort clients from heaviest to lightest.
+2. Look at each healthy WAN's configured capacity.
+3. Put the next client on the WAN with the lowest projected utilization.
+4. If utilization is tied, prefer fewer clients.
+5. If that is still tied, prefer the bigger WAN.
+
+So a 120 Mbps WAN gets treated differently than a 40 Mbps WAN. Not perfectly, because cellular is cellular and sometimes the laws of radio propagation show up with a chair, but better than "six clients here, six clients there."
+
+Example config:
+
+```sh
+ASSIGNMENT_MODE=throughput
+INTERFACES="tethering modem_2_1 wan"
+WAN_CAPACITY_MBPS="tethering:80 modem_2_1:60 wan:100"
+ACCOUNTING=1
+CLIENT_RATE_ALPHA=70
+MIN_SAMPLE_SECONDS=2
+```
+
+The dashboard samples rates while enabled and shows per-client outbound Mbps. `wan-split rebalance` uses the latest samples to move clients. There is no always-on background loop yet. That is deliberate. In a live upload workflow, a manual REBALANCE button is much easier to trust than a hidden daemon moving clients every few seconds because it thinks it is being helpful.
 
 ## Install
 
@@ -143,6 +173,9 @@ INTERFACES="tethering modem_2_1 wan secondwan wwan"
 PRIO=25300
 TABLE_BASE=20010
 ASSIGNMENT_MODE=balanced
+WAN_CAPACITY_MBPS=""
+WAN_CAPACITY_DEFAULT_MBPS=60
+ACCOUNTING=1
 HEALTH_CHECK=1
 HEALTH_TARGETS="1.1.1.1 8.8.8.8"
 EXCLUDE_IPS=""
@@ -164,6 +197,7 @@ ifstatus wan
 wan-split dry-run     # show active WANs and planned assignments
 wan-split on          # enable for this runtime and apply rules
 wan-split off         # disable and remove rules
+wan-split sample      # update per-client throughput counters
 wan-split rebalance   # recompute assignments now
 wan-split status      # show config, WANs, assignments, and installed rules
 wan-split stop        # remove rules without changing runtime enable state
@@ -180,10 +214,21 @@ tests/run-mock-tests.sh
 These test:
 
 - 12 clients split 6/6 over two WANs
+- throughput mode across three WANs with 120/80/40 Mbps capacity hints
+- heavy-client placement onto higher-capacity/lower-utilization WANs
+- third-WAN drop and reassignment to remaining WANs
 - one WAN down, all clients moved to the other WAN
 - all WANs down, no assignments
 - runtime enable marker behavior
 - route cleanup on disable
+
+Accounting tests:
+
+```sh
+tests/run-accounting-tests.sh
+```
+
+These mock `iptables-save` counter output and verify that byte deltas become per-client bitrates.
 
 Router shadow test:
 

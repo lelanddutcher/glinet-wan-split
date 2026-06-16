@@ -9,6 +9,13 @@ INTERFACES=${INTERFACES:-"tethering modem_2_1 wan secondwan wwan"}
 PRIO=${PRIO:-25300}
 TABLE_BASE=${TABLE_BASE:-20010}
 ASSIGNMENT_MODE=${ASSIGNMENT_MODE:-balanced}
+WAN_CAPACITY_MBPS=${WAN_CAPACITY_MBPS:-}
+WAN_CAPACITY_DEFAULT_MBPS=${WAN_CAPACITY_DEFAULT_MBPS:-60}
+ACCOUNTING=${ACCOUNTING:-1}
+ACCOUNTING_CHAIN=${ACCOUNTING_CHAIN:-WAN_SPLIT_ACCT}
+CLIENT_RATE_ALPHA=${CLIENT_RATE_ALPHA:-70}
+MIN_SAMPLE_SECONDS=${MIN_SAMPLE_SECONDS:-2}
+CLIENT_RATE_HINTS=${CLIENT_RATE_HINTS:-}
 HEALTH_CHECK=${HEALTH_CHECK:-1}
 HEALTH_TARGETS=${HEALTH_TARGETS:-"1.1.1.1 8.8.8.8"}
 HEALTH_COUNT=${HEALTH_COUNT:-1}
@@ -22,6 +29,7 @@ LOG_FILE=${LOG_FILE:-/tmp/wan-split.log}
 STATE_FILE="$STATE_DIR/state"
 ACTIVE_FILE="$STATE_DIR/active"
 ASSIGN_FILE="$STATE_DIR/assignments"
+STATS_FILE="$STATE_DIR/client-rates"
 LOCK_DIR="$STATE_DIR/lock"
 RUNTIME_ENABLED_FILE="$STATE_DIR/enabled"
 
@@ -41,6 +49,7 @@ Commands:
   off          Disable and remove all wan-split routing rules/tables
   apply        Apply if ENABLED=1; otherwise no-op
   rebalance    Recompute and reinstall assignments immediately
+  sample       Update per-client accounting counters; no route changes
   stop         Remove all wan-split routing rules/tables without editing config
   status       Show configuration, active WANs, assignments, and installed rules
   hotplug      Internal use by /etc/hotplug.d/iface/95-wan-split
@@ -118,6 +127,24 @@ table_for_iface() {
 		i=$((i + 1))
 	done
 	return 1
+}
+
+capacity_mbps_for_iface() {
+	want="$1"
+	for pair in $WAN_CAPACITY_MBPS; do
+		name="${pair%%:*}"
+		value="${pair#*:}"
+		if [ "$name" = "$want" ] && [ -n "$value" ]; then
+			echo "$value"
+			return 0
+		fi
+	done
+	echo "$WAN_CAPACITY_DEFAULT_MBPS"
+}
+
+capacity_bps_for_iface() {
+	mbps="$(capacity_mbps_for_iface "$1")"
+	awk -v mbps="$mbps" 'BEGIN { if (mbps <= 0) mbps = 1; printf "%.0f\n", mbps * 1000000 }'
 }
 
 iface_status_json() {
@@ -242,12 +269,162 @@ list_leases() {
 	' "$LEASE_FILE"
 }
 
+client_rate_hint() {
+	want="$1"
+	for pair in $CLIENT_RATE_HINTS; do
+		ip="${pair%%:*}"
+		rate="${pair#*:}"
+		if [ "$ip" = "$want" ] && [ -n "$rate" ]; then
+			echo "$rate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+client_rate_bps() {
+	ip="$1"
+	if rate="$(client_rate_hint "$ip")"; then
+		echo "$rate"
+		return 0
+	fi
+	if [ -f "$STATS_FILE" ]; then
+		awk -F'|' -v ip="$ip" '$1 == ip { print $4; found = 1; exit } END { if (!found) print 0 }' "$STATS_FILE"
+	else
+		echo 0
+	fi
+}
+
+ensure_accounting_rules() {
+	[ "$ACCOUNTING" = "1" ] || return 1
+	command -v iptables >/dev/null 2>&1 || return 1
+
+	iptables -t mangle -N "$ACCOUNTING_CHAIN" 2>/dev/null || true
+	iptables -t mangle -C PREROUTING -i br-lan -j "$ACCOUNTING_CHAIN" 2>/dev/null ||
+		iptables -t mangle -I PREROUTING 1 -i br-lan -j "$ACCOUNTING_CHAIN" 2>/dev/null || return 1
+
+	list_leases | while IFS='|' read -r mac ip host; do
+		[ -n "$ip" ] || continue
+		is_excluded_ip "$ip" && continue
+		iptables -t mangle -C "$ACCOUNTING_CHAIN" -s "$ip/32" -j RETURN 2>/dev/null ||
+			iptables -t mangle -A "$ACCOUNTING_CHAIN" -s "$ip/32" -j RETURN 2>/dev/null || true
+	done
+}
+
+read_accounting_counters() {
+	command -v iptables-save >/dev/null 2>&1 && {
+		iptables-save -t mangle -c 2>/dev/null | awk -v chain="$ACCOUNTING_CHAIN" '
+			$2 == "-A" && $3 == chain {
+				bytes = $1
+				gsub(/^\[/, "", bytes)
+				gsub(/\]$/, "", bytes)
+				split(bytes, parts, ":")
+				source = ""
+				for (i = 1; i <= NF; i++) {
+					if ($i == "-s") {
+						source = $(i + 1)
+						sub(/\/32$/, "", source)
+					}
+				}
+				if (source != "") print source "|" parts[2]
+			}
+		'
+		return 0
+	}
+
+	command -v iptables >/dev/null 2>&1 || return 1
+	iptables -t mangle -L "$ACCOUNTING_CHAIN" -v -x -n 2>/dev/null | awk '
+		$3 == "RETURN" {
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/32)?$/) {
+					source = $i
+					sub(/\/32$/, "", source)
+					print source "|" $2
+					break
+				}
+			}
+		}
+	'
+}
+
+write_hint_rates() {
+	now="$(date +%s)"
+	tmp="$STATS_FILE.tmp.$$"
+	: > "$tmp"
+	list_leases | while IFS='|' read -r mac ip host; do
+		[ -n "$ip" ] || continue
+		is_excluded_ip "$ip" && continue
+		rate="$(client_rate_bps "$ip")"
+		echo "$ip|0|$now|$rate" >> "$tmp"
+	done
+	mv "$tmp" "$STATS_FILE"
+}
+
+refresh_client_rates() {
+	mkdir -p "$STATE_DIR"
+
+	if [ -n "$CLIENT_RATE_HINTS" ]; then
+		write_hint_rates
+		return 0
+	fi
+
+	ensure_accounting_rules || return 0
+	now="$(date +%s)"
+	counters="$STATE_DIR/counters.$$"
+	tmp="$STATS_FILE.tmp.$$"
+	read_accounting_counters > "$counters" || { rm -f "$counters"; return 0; }
+	[ -f "$STATS_FILE" ] || : > "$STATS_FILE"
+
+	awk -F'|' \
+		-v now="$now" \
+		-v alpha="$CLIENT_RATE_ALPHA" \
+		-v min_dt="$MIN_SAMPLE_SECONDS" \
+		-v stats="$STATS_FILE" '
+		FILENAME == stats {
+			prev_bytes[$1] = $2
+			prev_time[$1] = $3
+			prev_rate[$1] = $4
+			next
+		}
+		{
+			ip = $1
+			bytes = $2
+			rate = 0
+			if (ip in prev_bytes) {
+				dt = now - prev_time[ip]
+				if (dt >= min_dt && bytes >= prev_bytes[ip]) {
+					instant = ((bytes - prev_bytes[ip]) * 8) / dt
+					rate = ((prev_rate[ip] * alpha) + (instant * (100 - alpha))) / 100
+				} else {
+					rate = prev_rate[ip]
+				}
+			}
+			printf "%s|%.0f|%s|%.0f\n", ip, bytes, now, rate
+		}
+	' "$STATS_FILE" "$counters" > "$tmp" 2>/dev/null || cp "$counters" "$tmp"
+
+	mv "$tmp" "$STATS_FILE"
+	rm -f "$counters"
+}
+
+cleanup_accounting() {
+	command -v iptables >/dev/null 2>&1 || return 0
+	while iptables -t mangle -C PREROUTING -i br-lan -j "$ACCOUNTING_CHAIN" 2>/dev/null; do
+		iptables -t mangle -D PREROUTING -i br-lan -j "$ACCOUNTING_CHAIN" 2>/dev/null || break
+	done
+	iptables -t mangle -F "$ACCOUNTING_CHAIN" 2>/dev/null || true
+	iptables -t mangle -X "$ACCOUNTING_CHAIN" 2>/dev/null || true
+	rm -f "$STATS_FILE"
+}
+
 list_assignments() {
 	active="$1"
 	count="$(active_count "$active")"
 	[ "$count" -gt 0 ] || return 0
 
-	if [ "$ASSIGNMENT_MODE" = "balanced" ]; then
+	if [ "$ASSIGNMENT_MODE" = "throughput" ]; then
+		list_assignments_throughput "$active"
+	elif [ "$ASSIGNMENT_MODE" = "balanced" ]; then
 		idx=0
 		list_leases | while IFS='|' read -r mac ip host; do
 			[ -n "$mac" ] && [ -n "$ip" ] || continue
@@ -260,7 +437,8 @@ list_assignments() {
 			IFS='|' read -r iface table dev gw src metric <<EOF
 $line
 EOF
-			echo "$ip|$mac|$host|$iface|$table|$dev|$gw|$src|$metric"
+			rate="$(client_rate_bps "$ip")"
+			echo "$ip|$mac|$host|$iface|$table|$dev|$gw|$src|$metric|$rate"
 			idx=$((idx + 1))
 		done
 	else
@@ -273,9 +451,67 @@ EOF
 			IFS='|' read -r _iface table dev gw src metric <<EOF
 $line
 EOF
-			echo "$ip|$mac|$host|$iface|$table|$dev|$gw|$src|$metric"
+			rate="$(client_rate_bps "$ip")"
+			echo "$ip|$mac|$host|$iface|$table|$dev|$gw|$src|$metric|$rate"
 		done
 	fi
+}
+
+list_assignments_throughput() {
+	active="$1"
+	active_aug="$STATE_DIR/active.capacity.$$"
+	clients_tmp="$STATE_DIR/clients.rate.$$"
+	: > "$active_aug"
+	: > "$clients_tmp"
+
+	while IFS='|' read -r iface table dev gw src metric; do
+		[ -n "$iface" ] || continue
+		capacity="$(capacity_bps_for_iface "$iface")"
+		echo "$iface|$table|$dev|$gw|$src|$metric|$capacity" >> "$active_aug"
+	done < "$active"
+
+	list_leases | while IFS='|' read -r mac ip host; do
+		[ -n "$mac" ] && [ -n "$ip" ] || continue
+		is_excluded_ip "$ip" && continue
+		rate="$(client_rate_bps "$ip")"
+		key="$(score_pair "$mac" "lease")"
+		echo "$rate|$key|$mac|$ip|$host"
+	done | sort -t '|' -k1,1nr -k2,2 > "$clients_tmp"
+
+	awk -F'|' '
+		FNR == NR {
+			n++
+			iface[n] = $1
+			table[n] = $2
+			dev[n] = $3
+			gw[n] = $4
+			src[n] = $5
+			metric[n] = $6
+			capacity[n] = ($7 > 0 ? $7 : 1)
+			next
+		}
+		{
+			rate = ($1 >= 0 ? $1 : 0)
+			mac = $3
+			ip = $4
+			host = $5
+			best = 1
+			for (i = 1; i <= n; i++) {
+				util = int((load[i] * 1000000) / capacity[i])
+				best_util = int((load[best] * 1000000) / capacity[best])
+				if (util < best_util ||
+					(util == best_util && count[i] < count[best]) ||
+					(util == best_util && count[i] == count[best] && capacity[i] > capacity[best])) {
+					best = i
+				}
+			}
+			load[best] += rate
+			count[best]++
+			print ip "|" mac "|" host "|" iface[best] "|" table[best] "|" dev[best] "|" gw[best] "|" src[best] "|" metric[best] "|" rate
+		}
+	' "$active_aug" "$clients_tmp"
+
+	rm -f "$active_aug" "$clients_tmp"
 }
 
 cleanup_routes() {
@@ -338,7 +574,7 @@ install_routes() {
 		echo "WAN $iface $table $dev $gw $src $metric" >> "$STATE_FILE"
 	done < "$active"
 
-	list_assignments "$active" | while IFS='|' read -r ip mac host iface table dev gw src metric; do
+	list_assignments "$active" | while IFS='|' read -r ip mac host iface table dev gw src metric rate; do
 		[ -n "$ip" ] && [ -n "$iface" ] || continue
 		ip rule add from "$ip/32" table "$table" priority "$PRIO" || return 1
 		echo "RULE $ip $table $PRIO $iface $mac $host" >> "$STATE_FILE"
@@ -368,8 +604,8 @@ plan() {
 		echo "  no current DHCP leases in LAN prefix"
 		return
 	fi
-	list_assignments "$active" | while IFS='|' read -r ip mac host iface table dev gw src metric; do
-		echo "  $ip $mac $host -> $iface table=$table dev=$dev"
+	list_assignments "$active" | while IFS='|' read -r ip mac host iface table dev gw src metric rate; do
+		echo "  $ip $mac $host -> $iface table=$table dev=$dev rate_bps=${rate:-0}"
 	done
 }
 
@@ -399,6 +635,7 @@ cmd_apply_force() {
 		return 1
 	fi
 
+	refresh_client_rates
 	cleanup_routes
 	build_active_file "$active_tmp"
 	install_routes "$active_tmp" || {
@@ -431,6 +668,8 @@ cmd_status() {
 	echo "  priority=$PRIO"
 	echo "  table_base=$TABLE_BASE"
 	echo "  assignment_mode=$ASSIGNMENT_MODE"
+	echo "  wan_capacity_mbps=${WAN_CAPACITY_MBPS:-default:$WAN_CAPACITY_DEFAULT_MBPS}"
+	echo "  accounting=$ACCOUNTING chain=$ACCOUNTING_CHAIN"
 	echo "  health_check=$HEALTH_CHECK targets=$HEALTH_TARGETS"
 	echo "  lease_file=$LEASE_FILE"
 	echo
@@ -448,6 +687,13 @@ cmd_status() {
 	echo "Current assignments:"
 	if [ -f "$ASSIGN_FILE" ]; then
 		sed 's/^/  /' "$ASSIGN_FILE"
+	else
+		echo "  none"
+	fi
+	echo
+	echo "Client rates:"
+	if [ -f "$STATS_FILE" ]; then
+		awk -F'|' '{ printf "  %s rate_bps=%s bytes=%s sampled=%s\n", $1, $4, $2, $3 }' "$STATS_FILE"
 	else
 		echo "  none"
 	fi
@@ -474,6 +720,7 @@ case "$1" in
 		lock_acquire || exit 1
 		set_enabled 0
 		cleanup_routes
+		cleanup_accounting
 		log "disabled"
 		lock_release
 		echo "wan-split disabled and routes removed."
@@ -484,9 +731,19 @@ case "$1" in
 	rebalance)
 		cmd_apply_force
 		;;
+	sample)
+		refresh_client_rates
+		echo "Client rates:"
+		if [ -f "$STATS_FILE" ]; then
+			awk -F'|' '{ printf "  %s rate_bps=%s bytes=%s sampled=%s\n", $1, $4, $2, $3 }' "$STATS_FILE"
+		else
+			echo "  none"
+		fi
+		;;
 	stop)
 		lock_acquire || exit 1
 		cleanup_routes
+		cleanup_accounting
 		log "stopped"
 		lock_release
 		echo "wan-split routes removed."

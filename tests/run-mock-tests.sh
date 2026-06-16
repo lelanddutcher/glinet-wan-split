@@ -54,6 +54,17 @@ JSON
 {"up":true,"l3_device":"wwan0_1","device":"wwan0_1"}
 JSON
 		;;
+	wan)
+		if [ "${MOCK_WAN3_UP:-0}" = "1" ]; then
+			cat <<JSON
+{"up":true,"l3_device":"eth1","device":"eth1"}
+JSON
+		else
+			cat <<JSON
+{"up":false,"device":"wan"}
+JSON
+		fi
+		;;
 	*)
 		cat <<JSON
 {"up":false,"device":"$1"}
@@ -106,6 +117,9 @@ if [ "$1" = "-4" ] && [ "$2" = "route" ] && [ "$3" = "show" ]; then
 			"default dev wwan0_1")
 				echo "default via 203.0.113.1 dev wwan0_1 proto static src 203.0.113.10 metric 40"
 				;;
+			"default dev eth1")
+				echo "default via 192.0.2.1 dev eth1 proto static src 192.0.2.10 metric 20"
+				;;
 		*)
 			echo "default proto static"
 			echo "192.168.7.0/24 dev br-lan scope link src 192.168.7.1"
@@ -119,6 +133,7 @@ if [ "$1" = "-4" ] && [ "$2" = "addr" ] && [ "$3" = "show" ]; then
 		br-lan) echo "    inet 192.168.7.1/24 brd 192.168.7.255 scope global br-lan" ;;
 			eth2) echo "    inet 198.51.100.10/24 brd 198.51.100.255 scope global eth2" ;;
 			wwan0_1) echo "    inet 203.0.113.10/24 brd 203.0.113.255 scope global wwan0_1" ;;
+			eth1) echo "    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth1" ;;
 	esac
 	exit 0
 fi
@@ -182,5 +197,38 @@ WAN_SPLIT_CONFIG="$WORK/conf" "$ROOT/files/usr/bin/wan-split" off > "$WORK/off.o
 grep -q '^ENABLED=0$' "$WORK/conf"
 [ ! -f "$WORK/state/enabled" ]
 grep -q 'ip rule del from 192.168.7.101/32' "$MOCK_IP_LOG"
+
+cat > "$WORK/throughput.conf" <<EOF
+ENABLED=0
+INTERFACES="tethering modem_2_1 wan"
+PRIO=25300
+TABLE_BASE=20010
+ASSIGNMENT_MODE=throughput
+WAN_CAPACITY_MBPS="tethering:80 modem_2_1:40 wan:120"
+WAN_CAPACITY_DEFAULT_MBPS=60
+ACCOUNTING=0
+CLIENT_RATE_HINTS="192.168.7.101:90000000 192.168.7.102:70000000 192.168.7.103:50000000 192.168.7.104:5000000 192.168.7.105:5000000 192.168.7.106:5000000 192.168.7.107:5000000 192.168.7.108:5000000 192.168.7.109:5000000 192.168.7.110:5000000 192.168.7.111:5000000 192.168.7.112:5000000"
+HEALTH_CHECK=1
+HEALTH_TARGETS="1.1.1.1 8.8.8.8"
+HEALTH_COUNT=1
+HEALTH_TIMEOUT=1
+HOTPLUG_REBALANCE=1
+EXCLUDE_IPS=""
+LEASE_FILE="$WORK/leases"
+STATE_DIR="$WORK/state-throughput"
+LOG_FILE="$WORK/log-throughput"
+EOF
+mkdir -p "$WORK/state-throughput"
+MOCK_WAN3_UP=1 WAN_SPLIT_CONFIG="$WORK/throughput.conf" "$ROOT/files/usr/bin/wan-split" dry-run > "$WORK/throughput.out"
+grep -q "wan table=20012 dev=eth1" "$WORK/throughput.out"
+grep -q "192.168.7.101 .* -> wan table=20012 dev=eth1 rate_bps=90000000" "$WORK/throughput.out"
+grep -q "192.168.7.102 .* -> tethering table=20010 dev=eth2 rate_bps=70000000" "$WORK/throughput.out"
+grep -q "192.168.7.103 .* -> modem_2_1 table=20011 dev=wwan0_1 rate_bps=50000000" "$WORK/throughput.out"
+[ "$(grep -c -- '-> wan' "$WORK/throughput.out")" -gt "$(grep -c -- '-> modem_2_1' "$WORK/throughput.out")" ]
+
+MOCK_WAN3_UP=1 MOCK_PING_FAIL_SRC="192.0.2.10" WAN_SPLIT_CONFIG="$WORK/throughput.conf" "$ROOT/files/usr/bin/wan-split" dry-run > "$WORK/throughput-wan-down.out"
+! grep -q "wan table=20012" "$WORK/throughput-wan-down.out"
+grep -q "192.168.7.101 .* -> tethering table=20010 dev=eth2 rate_bps=90000000" "$WORK/throughput-wan-down.out"
+grep -q "192.168.7.102 .* -> modem_2_1 table=20011 dev=wwan0_1 rate_bps=70000000" "$WORK/throughput-wan-down.out"
 
 echo "mock tests passed"
