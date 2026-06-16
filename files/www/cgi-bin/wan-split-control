@@ -1,0 +1,122 @@
+#!/bin/sh
+
+json_escape() {
+	sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' | awk '{ printf "%s\\n", $0 }'
+}
+
+query_value() {
+	key="$1"
+	echo "$QUERY_STRING" | tr '&' '\n' | awk -F= -v key="$key" '$1 == key { print $2; exit }'
+}
+
+emit_error() {
+	code="$1"
+	message="$2"
+	echo "Status: $code"
+	echo "Content-Type: application/json"
+	echo "Cache-Control: no-store"
+	echo
+	printf '{"ok":false,"error":"%s"}\n' "$message"
+	exit 0
+}
+
+WAN_SPLIT_BIN=${WAN_SPLIT_BIN:-/usr/bin/wan-split}
+ASSIGN_FILE=${WAN_SPLIT_ASSIGN_FILE:-/tmp/wan-split/assignments}
+ACTION="$(query_value action)"
+
+case "$ACTION" in
+	status|"") ;;
+	on|off|rebalance)
+		"$WAN_SPLIT_BIN" "$ACTION" >/tmp/wan-split-web.last 2>&1
+		;;
+	*)
+		emit_error 400 "bad action"
+		;;
+esac
+
+STATUS="$("$WAN_SPLIT_BIN" status 2>&1)"
+PLAN="$("$WAN_SPLIT_BIN" dry-run 2>/dev/null)"
+ENABLED="$(printf '%s\n' "$STATUS" | awk '/^  enabled=/ { sub(/^  enabled=/, ""); print; exit }')"
+[ -n "$ENABLED" ] || ENABLED=0
+LOAD="$(cut -d ' ' -f 1-3 /proc/loadavg 2>/dev/null)"
+MEMORY="$(awk '/MemTotal/ { total=$2 } /MemAvailable/ { avail=$2 } END { if (total > 0) printf "%.0f/%.0f MB avail", avail / 1024, total / 1024 }' /proc/meminfo 2>/dev/null)"
+STORAGE="$(df -h /overlay 2>/dev/null | awk 'NR == 2 { print $5 " used" }')"
+[ -n "$MEMORY" ] || MEMORY="-"
+[ -n "$STORAGE" ] || STORAGE="-"
+TIME="$(date '+%Y-%m-%d %H:%M:%S')"
+
+echo "Content-Type: application/json"
+echo "Cache-Control: no-store"
+echo
+
+printf '{"ok":true,'
+printf '"action":"%s",' "$ACTION"
+printf '"enabled":"%s",' "$ENABLED"
+printf '"time":"%s",' "$TIME"
+printf '"load":"%s",' "$LOAD"
+printf '"memory":"%s",' "$MEMORY"
+printf '"storage":"%s",' "$STORAGE"
+
+printf '"wans":['
+first=1
+printf '%s\n' "$PLAN" | awk '
+	/^  [a-zA-Z0-9_]+ table=/ {
+		name=$1
+		dev="-"; gw="-"; src="-"
+		for (i = 1; i <= NF; i++) {
+			if ($i ~ /^dev=/) { sub(/^dev=/, "", $i); dev=$i }
+			if ($i ~ /^gw=/) { sub(/^gw=/, "", $i); gw=$i }
+			if ($i ~ /^src=/) { sub(/^src=/, "", $i); src=$i }
+		}
+		print name "|" dev "|" gw "|" src
+	}
+' | while IFS='|' read -r name dev gw src; do
+	[ -n "$name" ] || continue
+	tx=0
+	rx=0
+	[ -r "/sys/class/net/$dev/statistics/tx_bytes" ] && tx="$(cat "/sys/class/net/$dev/statistics/tx_bytes")"
+	[ -r "/sys/class/net/$dev/statistics/rx_bytes" ] && rx="$(cat "/sys/class/net/$dev/statistics/rx_bytes")"
+	[ "$first" = "1" ] || printf ','
+	first=0
+	printf '{"name":"%s","dev":"%s","gw":"%s","src":"%s","tx_bytes":"%s","rx_bytes":"%s"}' "$name" "$dev" "$gw" "$src" "$tx" "$rx"
+done
+printf '],'
+
+printf '"clients":['
+first=1
+if [ -f "$ASSIGN_FILE" ]; then
+	while read -r ip mac host wan table dev gw src; do
+		[ -n "$ip" ] || continue
+		[ "$first" = "1" ] || printf ','
+		first=0
+		printf '{"ip":"%s","mac":"%s","host":"%s","wan":"%s","table":"%s","dev":"%s","gw":"%s","src":"%s"}' "$ip" "$mac" "$host" "$wan" "$table" "$dev" "$gw" "$src"
+	done < "$ASSIGN_FILE"
+fi
+printf '],'
+
+printf '"planned_clients":['
+first=1
+printf '%s\n' "$PLAN" | awk '
+	/^  [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ / && $4 == "->" {
+		ip=$1
+		mac=$2
+		host=$3
+		wan=$5
+		table="-"
+		dev="-"
+		for (i = 6; i <= NF; i++) {
+			if ($i ~ /^table=/) { sub(/^table=/, "", $i); table=$i }
+			if ($i ~ /^dev=/) { sub(/^dev=/, "", $i); dev=$i }
+		}
+		print ip "|" mac "|" host "|" wan "|" table "|" dev
+	}
+' | while IFS='|' read -r ip mac host wan table dev; do
+	[ -n "$ip" ] || continue
+	[ "$first" = "1" ] || printf ','
+	first=0
+	printf '{"ip":"%s","mac":"%s","host":"%s","wan":"%s","table":"%s","dev":"%s","state":"planned"}' "$ip" "$mac" "$host" "$wan" "$table" "$dev"
+done
+printf '],'
+
+RAW="$(printf '%s\n' "$STATUS" | json_escape)"
+printf '"raw":"%s"}\n' "$RAW"

@@ -1,0 +1,6 @@
+#!/bin/sh
+
+[ -x /usr/bin/wan-split ] || exit 0
+
+# Keep hotplug non-blocking; the controller has its own enable flag.
+/usr/bin/wan-split hotplug "$ACTION" "$INTERFACE" >/tmp/wan-split-hotplug.last 2>&1 &

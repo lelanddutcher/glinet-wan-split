@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAN Split Control</title>
+  <style>
+    :root {
+      --bg: #111312;
+      --panel: #1a1f1d;
+      --panel-2: #222925;
+      --line: #34413b;
+      --text: #eef3ef;
+      --muted: #9eada5;
+      --good: #41d187;
+      --warn: #f2bd4b;
+      --bad: #ff5e57;
+      --blue: #62a8ff;
+      --shadow: rgba(0, 0, 0, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      letter-spacing: 0;
+    }
+
+    main {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: end;
+      padding: 10px 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.1;
+      font-weight: 800;
+    }
+
+    .sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .state {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .dot.on { background: var(--good); }
+    .dot.off { background: var(--bad); }
+    .dot.warn { background: var(--warn); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    section {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: 0 14px 34px var(--shadow);
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-2);
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 14px;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .body { padding: 14px; }
+
+    .table-wrap {
+      max-height: 420px;
+      overflow: auto;
+      border: 1px solid var(--line);
+    }
+
+    .table-wrap table {
+      border: 0;
+    }
+
+    .table-wrap thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--panel-2);
+    }
+
+    .clients-scroll {
+      max-height: min(56vh, 540px);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr;
+      gap: 10px;
+    }
+
+    button, input {
+      min-height: 46px;
+      border: 1px solid var(--line);
+      background: #171b19;
+      color: var(--text);
+      font: inherit;
+      font-size: 15px;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 900;
+      transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+
+    button:active { transform: translateY(1px); }
+    button:disabled { opacity: 0.55; cursor: wait; }
+
+    .danger {
+      background: #3a1717;
+      border-color: #7c2b2b;
+      color: #fff5f3;
+    }
+
+    .primary {
+      background: #15351f;
+      border-color: #2f7e4d;
+    }
+
+    .secondary {
+      background: #152638;
+      border-color: #2e5f98;
+    }
+
+    input {
+      width: 100%;
+      padding: 0 11px;
+      outline: none;
+    }
+
+    input:focus { border-color: var(--blue); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 9px 8px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      word-break: break-word;
+    }
+
+    th {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      background: #151917;
+      padding: 11px;
+      min-height: 76px;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 800;
+    }
+
+    .metric .value {
+      margin-top: 8px;
+      font-size: 20px;
+      font-weight: 900;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #d7ded9;
+      font-size: 12px;
+      line-height: 1.45;
+      max-height: 360px;
+      overflow: auto;
+    }
+
+    .notice {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .flash {
+      color: var(--warn);
+      min-height: 18px;
+      font-size: 12px;
+      margin-top: 10px;
+    }
+
+    @media (max-width: 820px) {
+      main { padding: 12px; }
+      header, .grid, .controls, .metric-grid {
+        grid-template-columns: 1fr;
+      }
+      h1 { font-size: 24px; }
+      button { min-height: 56px; }
+      .clients-scroll { max-height: 62vh; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>WAN Split Control</h1>
+        <div class="sub">GL-X2000 policy routing monitor</div>
+      </div>
+      <div class="state"><span id="stateDot" class="dot warn"></span><span id="stateText">Waiting</span></div>
+    </header>
+
+    <div class="grid">
+      <section>
+        <div class="section-head">
+          <h2>Control</h2>
+          <span id="updated" class="notice">not refreshed</span>
+        </div>
+        <div class="body">
+          <div class="controls">
+            <button id="off" class="danger">DISABLE</button>
+            <button id="on" class="primary">ENABLE</button>
+            <button id="rebalance" class="secondary">REBALANCE</button>
+          </div>
+          <div id="flash" class="flash"></div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>Router</h2></div>
+        <div class="body">
+          <div class="metric-grid">
+            <div class="metric"><div class="label">Load</div><div id="load" class="value">--</div></div>
+            <div class="metric"><div class="label">Memory</div><div id="memory" class="value">--</div></div>
+            <div class="metric"><div class="label">Overlay</div><div id="storage" class="value">--</div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="grid">
+      <section>
+        <div class="section-head"><h2>WANs</h2><span id="wanCount" class="notice">--</span></div>
+        <div class="body">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Name</th><th>Device</th><th>Out</th><th>TX Total</th><th>RX Total</th></tr></thead>
+              <tbody id="wans"><tr><td colspan="5">No data</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>Clients</h2><span id="clientCount" class="notice">--</span></div>
+        <div class="body">
+          <div class="table-wrap clients-scroll">
+            <table>
+              <thead><tr><th>IP</th><th>Name</th><th>WAN</th><th>Device</th><th>State</th></tr></thead>
+              <tbody id="clients"><tr><td colspan="5">No data</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section style="margin-top:14px">
+      <div class="section-head"><h2>Raw Status</h2></div>
+      <div class="body"><pre id="raw">No status yet.</pre></div>
+    </section>
+  </main>
+
+  <script>
+    const flash = document.getElementById('flash');
+    const stateDot = document.getElementById('stateDot');
+    const stateText = document.getElementById('stateText');
+    const raw = document.getElementById('raw');
+    const buttons = ['off', 'on', 'rebalance'].map((id) => document.getElementById(id));
+    const wanSamples = new Map();
+
+    buttons.forEach((button) => {
+      button.addEventListener('click', () => call(button.id));
+    });
+
+    async function call(action) {
+      setBusy(true);
+      flash.textContent = action === 'off' ? 'Disabling WAN split...' : 'Running ' + action + '...';
+      try {
+        const response = await fetch('/cgi-bin/wan-split-control?action=' + encodeURIComponent(action), {
+          cache: 'no-store'
+        });
+        const data = await response.json();
+        render(data);
+        flash.textContent = data.ok ? 'Command complete.' : 'Command failed.';
+      } catch (error) {
+        flash.textContent = 'Request failed: ' + error.message;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch('/cgi-bin/wan-split-control?action=status', {
+          cache: 'no-store'
+        });
+        render(await response.json());
+      } catch (error) {
+        stateDot.className = 'dot warn';
+        stateText.textContent = 'Offline';
+        raw.textContent = error.message;
+      }
+    }
+
+    function render(data) {
+      if (!data.ok) {
+        stateDot.className = 'dot warn';
+        stateText.textContent = data.error || 'Error';
+      } else {
+        stateDot.className = data.enabled === '1' ? 'dot on' : 'dot off';
+        stateText.textContent = data.enabled === '1' ? 'Enabled' : 'Disabled';
+      }
+
+      document.getElementById('updated').textContent = data.time || 'not refreshed';
+      document.getElementById('load').textContent = data.load || '--';
+      document.getElementById('memory').textContent = data.memory || '--';
+      document.getElementById('storage').textContent = data.storage || '--';
+      raw.textContent = data.raw || data.error || 'No status.';
+
+      const wans = data.wans || [];
+      const clients = mergeClients(data.clients || [], data.planned_clients || []);
+      document.getElementById('wanCount').textContent = wans.length + ' active';
+      document.getElementById('clientCount').textContent = clients.length + ' shown';
+      renderWanRows(wans, data.time || '');
+      renderRows('clients', clients, ['ip', 'host', 'wan', 'dev', 'state']);
+    }
+
+    function mergeClients(installed, planned) {
+      const plannedByIp = new Map(planned.map((row) => [row.ip, row]));
+      const rows = installed.map((row) => {
+        plannedByIp.delete(row.ip);
+        return Object.assign({ state: 'installed' }, row);
+      });
+      plannedByIp.forEach((row) => rows.push(Object.assign({ state: 'planned' }, row)));
+      rows.sort((a, b) => ipSortKey(a.ip).localeCompare(ipSortKey(b.ip)));
+      return rows;
+    }
+
+    function ipSortKey(ip) {
+      return String(ip || '').split('.').map((part) => part.padStart(3, '0')).join('.');
+    }
+
+    function renderWanRows(rows, sampleTime) {
+      const body = document.getElementById('wans');
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="5">No data</td></tr>';
+        return;
+      }
+
+      const now = Date.now();
+      body.innerHTML = rows.map((row) => {
+        const key = row.name + ':' + row.dev;
+        const tx = Number(row.tx_bytes || 0);
+        const rx = Number(row.rx_bytes || 0);
+        const prev = wanSamples.get(key);
+        let outRate = '--';
+        if (prev && tx >= prev.tx && now > prev.time) {
+          outRate = formatMbps(((tx - prev.tx) * 8) / ((now - prev.time) / 1000));
+        }
+        wanSamples.set(key, { tx, rx, time: now, sampleTime });
+        return '<tr>' +
+          '<td>' + escapeHtml(row.name || '-') + '</td>' +
+          '<td>' + escapeHtml(row.dev || '-') + '</td>' +
+          '<td>' + escapeHtml(outRate) + '</td>' +
+          '<td>' + escapeHtml(formatBytes(tx)) + '</td>' +
+          '<td>' + escapeHtml(formatBytes(rx)) + '</td>' +
+          '</tr>';
+      }).join('');
+    }
+
+    function renderRows(id, rows, keys) {
+      const body = document.getElementById(id);
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="' + keys.length + '">No data</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map((row) => {
+        return '<tr>' + keys.map((key) => '<td>' + escapeHtml(row[key] || '-') + '</td>').join('') + '</tr>';
+      }).join('');
+    }
+
+    function setBusy(busy) {
+      buttons.forEach((button) => button.disabled = busy);
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[char]);
+    }
+
+    function formatMbps(bitsPerSecond) {
+      if (!Number.isFinite(bitsPerSecond)) return '--';
+      const mbps = bitsPerSecond / 1000000;
+      if (mbps < 0.1) return mbps.toFixed(3) + ' Mbps';
+      if (mbps < 10) return mbps.toFixed(2) + ' Mbps';
+      return mbps.toFixed(1) + ' Mbps';
+    }
+
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes)) return '--';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      const digits = unit < 2 ? 0 : 2;
+      return value.toFixed(digits) + ' ' + units[unit];
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+.DS_Store
+*.tar
+*.tar.gz
+router-backups/
+*.bak
+*.bak-*
+tmp/
+
