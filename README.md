@@ -274,6 +274,14 @@ On newer GL.iNet firmware, GL's Multi-WAN system is often handled by `kmwan`. GL
 
 Use `mwan3` when you want a standard OpenWrt package and are comfortable replacing or bypassing vendor Multi-WAN behavior. Use `wan-split` when you want a small, reversible, source-client distribution layer on top of an existing GL.iNet setup.
 
+## True Bonding Research
+
+This repo also includes notes on the bigger "split traffic across multiple WANs and reassemble it on a home/VPS/fiber exit node" idea:
+
+- [True Bonding Architecture Notes](docs/true-bonding-architecture.md)
+
+Short version: OpenMPTCProuter is the closest existing open-source stack. Tailscale-style exit-node UX is the right mental model, but Tailscale itself does not currently do packet-level multipath bonding.
+
 ## Uninstall
 
 ```sh
